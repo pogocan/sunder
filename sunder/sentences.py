@@ -57,6 +57,37 @@ def _split_line_into_sentences(line: str) -> list[str]:
     return sentences if sentences else [line.strip()]
 
 
+def split_text_to_sentences(
+    text: str, atomic_line_length: int = 150,
+) -> list[str]:
+    """Split raw text into sentence strings using the same heuristic as segment_sentences.
+
+    Useful when you need sentence texts *before* building Chunk/Sentence objects
+    (e.g. sentence-aware chunking).
+
+    Args:
+        text: Raw text to segment.
+        atomic_line_length: Lines shorter than this are never split.
+
+    Returns:
+        List of sentence strings, in document order. Empty strings are excluded.
+    """
+    if not text or not text.strip():
+        return []
+
+    sentences: list[str] = []
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if len(line) <= atomic_line_length:
+            sentences.append(line)
+        else:
+            parts = _split_line_into_sentences(line)
+            sentences.extend(p for p in parts if p)
+    return sentences
+
+
 def segment_sentences(
     chunks: list[Chunk], config: SunderConfig | None = None,
 ) -> list[Chunk]:

@@ -40,9 +40,30 @@ class SunderConfig:
     # Graph extraction
     graph_max_chunks: int | None = None  # limit chunks for KG extraction (None = all)
 
+    # Vector store
+    vector_store: str = "faiss"     # "faiss" only for now; field exists for forward compat
+
     # Search
     default_top_k: int = 10
     search_oversample: int = 3      # fetch top_k * this, then group by chunk
+
+
+@dataclass
+class AgentConfig:
+    """Runtime configuration for the agent loop. Not persisted with the corpus.
+
+    Controls which LLM provider is used, model selection, and agent behavior
+    limits. Separate from SunderConfig because agent behavior is session-specific
+    and should not be baked into a corpus.
+    """
+    # LLM provider
+    provider: str = "anthropic"     # "anthropic" | "openai" | "ollama"
+    model: str | None = None        # None = sensible default per provider
+    ollama_base_url: str = "http://localhost:11434"
+
+    # Agent behavior limits
+    max_steps: int = 10
+    max_reads: int = 4
 
 
 # -- Document Structure -------------------------------------------------------

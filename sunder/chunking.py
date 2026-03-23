@@ -1,11 +1,12 @@
 """
 sunder.chunking -- Text chunking utilities.
 
-Two modes:
+Three modes:
   - chunk_text(): flat paragraph-boundary chunking
-  - chunk_by_topics(): chunk within topic boundaries so chunks never cross topics
+  - chunk_by_topics(): chunk within topic boundaries at paragraph boundaries
+  - chunk_by_topics_sentence_aware(): chunk within topic boundaries at sentence boundaries
 
-Both return list[Chunk] with the unified schema.
+All return list[Chunk] with the unified schema.
 """
 
 from __future__ import annotations
@@ -13,7 +14,8 @@ from __future__ import annotations
 import re
 
 from .constants import PAGE_BREAK
-from .types import Chunk, DocumentStructure, SunderConfig
+from .sentences import split_text_to_sentences
+from .types import Chunk, DocumentStructure, Sentence, SunderConfig
 
 
 def _split_paragraphs(text: str) -> list[tuple[str, int]]:
@@ -185,5 +187,155 @@ def chunk_by_topics(
                 chunk_index_in_topic=local_idx,
             ))
             global_idx += 1
+
+    return all_chunks
+
+
+def chunk_by_topics_sentence_aware(
+    full_text: str,
+    doc_id: str,
+    structure: DocumentStructure,
+    config: SunderConfig | None = None,
+) -> list[Chunk]:
+    """Chunk a document at sentence boundaries within topic spans.
+
+    Unlike chunk_by_topics (which chunks at paragraph boundaries then segments
+    sentences afterward), this function segments sentences *first* and uses
+    sentences as the atomic packing unit. Chunk boundaries always fall on
+    sentence boundaries.
+
+    Overlap behavior: when a chunk is flushed, the last N sentences (fitting
+    within chunk_overlap words) are carried to the START of the next chunk's
+    sentence list. Carried sentences get new Sentence objects with IDs belonging
+    to the new chunk — they are not duplicated in storage, but the agent sees
+    overlap context when reading chunk text.
+
+    Chunks come back with .sentences already populated — no need to call
+    segment_sentences() afterward.
+
+    Args:
+        full_text: The full document text.
+        doc_id: Document identifier (used for deterministic chunk IDs).
+        structure: DocumentStructure from detect_structure().
+        config: Pipeline config. Uses SunderConfig() defaults if None.
+
+    Returns:
+        List of Chunk objects with topic fields and sentences populated.
+    """
+    cfg = config or SunderConfig()
+    sections = structure.sections
+    if not sections:
+        return chunk_text(full_text, doc_id, cfg)
+
+    all_chunks: list[Chunk] = []
+    global_chunk_idx = 0
+    sent_counter = 0  # globally unique sentence counter for this doc
+
+    for topic_idx, section in enumerate(sections):
+        section_text = full_text[section.start_char:section.end_char]
+        if not section_text.strip():
+            continue
+
+        # Segment the entire topic span into sentences
+        sent_texts = split_text_to_sentences(
+            section_text, atomic_line_length=cfg.atomic_line_length,
+        )
+        if not sent_texts:
+            continue
+
+        # Greedy sentence packing within this topic
+        local_chunk_idx = 0
+        current_sents: list[str] = []   # sentence texts in current chunk
+        current_words = 0
+        overlap_sents: list[str] = []   # sentences to carry into next chunk
+
+        def _flush_chunk() -> None:
+            nonlocal global_chunk_idx, local_chunk_idx, sent_counter
+            nonlocal current_sents, current_words, overlap_sents
+
+            chunk_str = " ".join(current_sents)
+            word_count = _word_count(chunk_str)
+
+            if word_count < cfg.min_chunk_size:
+                # Too small — don't emit, but don't carry overlap either
+                current_sents = []
+                current_words = 0
+                overlap_sents = []
+                return
+
+            chunk_id = f"{doc_id}_chunk_{global_chunk_idx:04d}"
+
+            # Build Sentence objects for this chunk
+            sentences: list[Sentence] = []
+            for si, st in enumerate(current_sents):
+                sentences.append(Sentence(
+                    sentence_id=f"{doc_id}_sent_{sent_counter:06d}",
+                    chunk_id=chunk_id,
+                    doc_id=doc_id,
+                    text=st,
+                    sent_index_in_chunk=si,
+                ))
+                sent_counter += 1
+
+            # Approximate start_char: find first sentence text in section
+            first_sent = current_sents[0]
+            rel_start = section_text.find(first_sent)
+            if rel_start == -1:
+                rel_start = 0
+            chunk_start = section.start_char + rel_start
+
+            all_chunks.append(Chunk(
+                chunk_id=chunk_id,
+                doc_id=doc_id,
+                text=chunk_str,
+                token_count=len(chunk_str) // 4,
+                chunk_index=global_chunk_idx,
+                page=_estimate_page(full_text, chunk_start),
+                start_char=chunk_start,
+                end_char=min(chunk_start + len(chunk_str), section.end_char),
+                topic_title=section.title,
+                topic_summary=section.summary or None,
+                topic_index=topic_idx,
+                chunk_index_in_topic=local_chunk_idx,
+                sentences=sentences,
+            ))
+            global_chunk_idx += 1
+            local_chunk_idx += 1
+
+            # Compute overlap: walk backward through current_sents collecting
+            # sentences that fit within chunk_overlap words
+            overlap_sents = []
+            overlap_words = 0
+            for s in reversed(current_sents):
+                sw = _word_count(s)
+                if overlap_words + sw > cfg.chunk_overlap:
+                    break
+                overlap_sents.insert(0, s)
+                overlap_words += sw
+            # Don't carry the entire chunk as overlap
+            if len(overlap_sents) == len(current_sents):
+                overlap_sents = overlap_sents[1:] if len(overlap_sents) > 1 else []
+
+            current_sents = []
+            current_words = 0
+
+        # Seed with overlap from previous chunk (empty for first chunk in topic)
+        for sent_text in sent_texts:
+            sent_words = _word_count(sent_text)
+
+            if current_words + sent_words > cfg.chunk_size and current_sents:
+                _flush_chunk()
+                # Carry overlap sentences into the new chunk
+                if overlap_sents:
+                    current_sents = list(overlap_sents)
+                    current_words = sum(_word_count(s) for s in overlap_sents)
+                    overlap_sents = []
+
+            current_sents.append(sent_text)
+            current_words += sent_words
+
+        # Flush remaining sentences in this topic
+        if current_sents:
+            _flush_chunk()
 
     return all_chunks

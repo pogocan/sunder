@@ -11,12 +11,10 @@ All methods return a DocumentStructure with sections, tree, and summaries.
 
 from __future__ import annotations
 
-import os
 import re
 
 from .chunking import _chunk_paragraphs
 from .constants import (
-    ANTHROPIC_MODEL,
     LLM_STRUCTURE_TOOL,
     PAGE_BREAK,
     RE_ALLCAPS,
@@ -27,6 +25,7 @@ from .constants import (
     SUMMARY_TOOL,
     TOPIC_TOOL,
 )
+from .llm import LLMProvider, get_provider
 from .types import DocumentStructure, Section
 
 
@@ -169,25 +168,26 @@ def _filter_toc_duplicates(headings: list[Section]) -> list[Section]:
 
 # -- LLM heading detection ----------------------------------------------------
 
-def detect_headings_llm(text: str, running_headers: list[str] | None = None) -> list[Section]:
-    """Use Claude to detect section headings from the document text."""
-    import anthropic
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
-
-    client = anthropic.Anthropic(api_key=api_key)
+def detect_headings_llm(
+    text: str,
+    running_headers: list[str] | None = None,
+    provider: LLMProvider | None = None,
+) -> list[Section]:
+    """Use an LLM to detect section headings from the document text."""
+    provider = provider or get_provider()
 
     sample_text = text
     if running_headers:
         sample_text = strip_running_headers(text, running_headers)
     sample = _build_text_sample(sample_text)
 
-    response = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=4096,
-        temperature=0.0,
+    result = provider.complete_with_tool(
+        messages=[{
+            "role": "user",
+            "content": f"Identify all section headings in this document:\n\n{sample}",
+        }],
+        tools=[LLM_STRUCTURE_TOOL],
+        tool_choice="report_document_structure",
         system=(
             "You are a document structure analyzer. Given a sample of a document's text, "
             "identify ALL section headings and their hierarchy levels.\n\n"
@@ -203,22 +203,14 @@ def detect_headings_llm(text: str, running_headers: list[str] | None = None) -> 
             "- Do NOT include page numbers or footers\n"
             "- Include ALL sections you can find, not just the first few"
         ),
-        tools=[LLM_STRUCTURE_TOOL],
-        tool_choice={"type": "tool", "name": "report_document_structure"},
-        messages=[{
-            "role": "user",
-            "content": f"Identify all section headings in this document:\n\n{sample}",
-        }],
     )
 
     raw_headings = []
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "report_document_structure":
-            for s in block.input.get("sections", []):
-                title = _clean_title(s["title"])
-                level = s.get("level", 2)
-                exact = s.get("heading_text_exact", title)
-                raw_headings.append((title, level, exact))
+    for s in result.input.get("sections", []):
+        title = _clean_title(s["title"])
+        level = s.get("level", 2)
+        exact = s.get("heading_text_exact", title)
+        raw_headings.append((title, level, exact))
 
     headings = []
     for title, level, exact in raw_headings:
@@ -456,15 +448,13 @@ def build_tree(headings: list[Section], text: str, doc_title: str = "") -> Docum
 
 # -- Section summarization ----------------------------------------------------
 
-def summarize_sections(structure: DocumentStructure, full_text: str) -> DocumentStructure:
+def summarize_sections(
+    structure: DocumentStructure,
+    full_text: str,
+    provider: LLMProvider | None = None,
+) -> DocumentStructure:
     """Add LLM-generated summaries to each section."""
-    import anthropic
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
-
-    client = anthropic.Anthropic(api_key=api_key)
+    provider = provider or get_provider()
 
     sections = structure.sections
     if not sections:
@@ -495,27 +485,22 @@ def summarize_sections(structure: DocumentStructure, full_text: str) -> Document
                 f"{ss['sample']}\n"
             )
 
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=4096,
-            temperature=0.0,
+        result = provider.complete_with_tool(
+            messages=[{
+                "role": "user",
+                "content": "Summarize each of these document sections:\n\n" + "\n".join(prompt_parts),
+            }],
+            tools=[SUMMARY_TOOL],
+            tool_choice="summarize_sections",
             system=(
                 "You are a document summarizer. For each section, write a concise 1-3 sentence "
                 "summary based on the provided sample (beginning and end of the section). "
                 "Focus on the main topic and key points. Be specific, not generic."
             ),
-            tools=[SUMMARY_TOOL],
-            tool_choice={"type": "tool", "name": "summarize_sections"},
-            messages=[{
-                "role": "user",
-                "content": "Summarize each of these document sections:\n\n" + "\n".join(prompt_parts),
-            }],
         )
 
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "summarize_sections":
-                for item in block.input.get("summaries", []):
-                    all_summaries[item["title"]] = item["summary"]
+        for item in result.input.get("summaries", []):
+            all_summaries[item["title"]] = item["summary"]
 
     for s in sections:
         if s.title in all_summaries:
@@ -537,20 +522,19 @@ def _sample_section_content(content: str, head_chars: int = 600, tail_chars: int
 
 # -- Topic-based detection ----------------------------------------------------
 
-def detect_headings_topics(text: str, chunk_size: int = 200, chunk_overlap: int = 30) -> list[Section]:
+def detect_headings_topics(
+    text: str,
+    chunk_size: int = 200,
+    chunk_overlap: int = 30,
+    provider: LLMProvider | None = None,
+) -> list[Section]:
     """Detect document structure by analyzing content topics in chunks.
 
     Chunks the text, sends batches to the LLM to identify topic shifts,
     then converts topic segments into Section objects.
     Works on any document regardless of heading formatting.
     """
-    import anthropic
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
-
-    client = anthropic.Anthropic(api_key=api_key)
+    provider = provider or get_provider()
 
     topic_chunk_size = max(chunk_size, 400)
     topic_overlap = 50
@@ -582,10 +566,17 @@ def detect_headings_topics(text: str, chunk_size: int = 200, chunk_overlap: int 
             last = all_topics[-1]
             context = f"\nPrevious topic: \"{last['title']}\" (ending at chunk {last['end_chunk']}). Continue it if the topic hasn't changed."
 
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=2048,
-            temperature=0.0,
+        result = provider.complete_with_tool(
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Identify major topic segments in chunks "
+                    f"{win_start}-{win_end - 1} (of {len(chunks)} total):"
+                    f"{context}\n\n" + "\n\n".join(chunk_text_parts)
+                ),
+            }],
+            tools=[TOPIC_TOOL],
+            tool_choice="report_topics",
             system=(
                 "You are a document structure analyzer. Given numbered text chunks, "
                 "identify the MAJOR topic segments. Group generously -- a book chapter "
@@ -598,22 +589,11 @@ def detect_headings_topics(text: str, chunk_size: int = 200, chunk_overlap: int 
                 "- If content continues the same subject as the previous topic, reuse that exact title.\n"
                 "- Only create a new topic when the subject clearly changes."
             ),
-            tools=[TOPIC_TOOL],
-            tool_choice={"type": "tool", "name": "report_topics"},
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Identify major topic segments in chunks "
-                    f"{win_start}-{win_end - 1} (of {len(chunks)} total):"
-                    f"{context}\n\n" + "\n\n".join(chunk_text_parts)
-                ),
-            }],
+            max_tokens=2048,
         )
 
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "report_topics":
-                for t in block.input.get("topics", []):
-                    all_topics.append(t)
+        for t in result.input.get("topics", []):
+            all_topics.append(t)
 
         if win_end >= len(chunks):
             break
@@ -688,7 +668,12 @@ def map_chunks_to_sections(
 
 # -- High-level API -----------------------------------------------------------
 
-def detect_structure(text: str, method: str = "topics", doc_title: str = "") -> DocumentStructure:
+def detect_structure(
+    text: str,
+    method: str = "topics",
+    doc_title: str = "",
+    provider: LLMProvider | None = None,
+) -> DocumentStructure:
     """Detect document structure using the specified method.
 
     Automatically detects and strips running headers before heading detection,
@@ -699,6 +684,7 @@ def detect_structure(text: str, method: str = "topics", doc_title: str = "") -> 
         method: "topics" (content-based, default), "llm" (heading detection),
                 or "regex" (pattern-based, free).
         doc_title: Optional document title for the root node.
+        provider: LLM provider for topic/llm methods. Auto-detected if None.
 
     Returns:
         DocumentStructure with sections and tree.
@@ -706,12 +692,12 @@ def detect_structure(text: str, method: str = "topics", doc_title: str = "") -> 
     running_headers = detect_running_headers(text)
 
     if method == "topics":
-        headings = detect_headings_topics(text)
+        headings = detect_headings_topics(text, provider=provider)
         structure = build_tree(headings, text, doc_title=doc_title)
         structure.method = method
         return structure
     elif method == "llm":
-        headings = detect_headings_llm(text, running_headers=running_headers)
+        headings = detect_headings_llm(text, running_headers=running_headers, provider=provider)
     else:
         headings = detect_headings_regex(text)
 

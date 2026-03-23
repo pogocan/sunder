@@ -11,13 +11,14 @@ import hashlib
 import time
 from pathlib import Path
 
-from .chunking import chunk_by_topics, chunk_text
+from .chunking import chunk_by_topics, chunk_by_topics_sentence_aware, chunk_text
 from .extract import extract_pdf
 from .index import Corpus, index_embeddings, _save_triples
-from .kg import AnthropicExtractor, normalize_triples, deduplicate_triples
+from .kg import LLMExtractor, normalize_triples, deduplicate_triples
+from .llm import LLMProvider, get_provider
 from .sentences import segment_sentences
 from .structure import detect_structure
-from .types import Chunk, Ontology, SunderConfig
+from .types import AgentConfig, Chunk, Ontology, SunderConfig
 
 
 def _doc_id_from_path(path: str) -> str:
@@ -35,6 +36,8 @@ def ingest(
     docs: list[str],
     output_dir: str,
     config: SunderConfig | None = None,
+    agent_config: AgentConfig | None = None,
+    provider: LLMProvider | None = None,
     extract_graph: bool = False,
     pages: str | None = None,
     on_progress: callable | None = None,
@@ -50,8 +53,10 @@ def ingest(
               - A raw text string (used directly, doc_id derived from hash)
         output_dir: Directory for corpus files (faiss.index, metadata, config).
         config: Pipeline configuration. Uses SunderConfig() defaults if None.
-        extract_graph: If True, run KG extraction on chunks via Anthropic API.
-                       Requires ANTHROPIC_API_KEY in environment.
+        agent_config: Runtime config for LLM provider selection. Used to create
+                      a provider if none is given explicitly.
+        provider: Pre-initialized LLMProvider. Takes precedence over agent_config.
+        extract_graph: If True, run KG extraction on chunks via LLM.
         pages: Optional page range for PDF extraction (e.g. "1-50"). Applied to all PDFs.
         on_progress: Optional callback(stage: str, detail: str) for progress reporting.
 
@@ -60,6 +65,15 @@ def ingest(
         corpus.triples is populated and triples.jsonl is persisted.
     """
     cfg = config or SunderConfig()
+
+    # Create LLM provider lazily: only needed for topic chunking or graph extraction
+    _provider: LLMProvider | None = provider
+
+    def _get_provider() -> LLMProvider:
+        nonlocal _provider
+        if _provider is None:
+            _provider = get_provider(agent_config)
+        return _provider
 
     def _report(stage: str, detail: str):
         if on_progress:
@@ -86,9 +100,19 @@ def ingest(
             continue
 
         # -- Stage 2: Chunk --
-        if cfg.chunking_mode == "topic":
+        # "topic_sentence" mode builds sentences during chunking (no separate step).
+        # "topic" and "flat" modes require a separate segment_sentences() pass.
+        sentences_done = False
+
+        if cfg.chunking_mode == "topic_sentence":
+            _report("chunk", f"  Topic segmentation + sentence-aware chunking {doc_id}...")
+            structure = detect_structure(text, method="topics", doc_title=doc_id, provider=_get_provider())
+            _report("chunk", f"  {len(structure.sections)} topics detected")
+            chunks = chunk_by_topics_sentence_aware(text, doc_id, structure, config=cfg)
+            sentences_done = True
+        elif cfg.chunking_mode == "topic":
             _report("chunk", f"  Topic segmentation + chunking {doc_id}...")
-            structure = detect_structure(text, method="topics", doc_title=doc_id)
+            structure = detect_structure(text, method="topics", doc_title=doc_id, provider=_get_provider())
             _report("chunk", f"  {len(structure.sections)} topics detected")
             chunks = chunk_by_topics(text, doc_id, structure, config=cfg)
         else:
@@ -99,9 +123,10 @@ def ingest(
             _report("chunk", f"  Skipped {doc_id}: no chunks after filtering")
             continue
 
-        # -- Stage 3: Sentence segmentation --
-        _report("segment", f"  Segmenting {doc_id}: {len(chunks)} chunks...")
-        segment_sentences(chunks, config=cfg)
+        # -- Stage 3: Sentence segmentation (skipped for topic_sentence) --
+        if not sentences_done:
+            _report("segment", f"  Segmenting {doc_id}: {len(chunks)} chunks...")
+            segment_sentences(chunks, config=cfg)
 
         sent_count = sum(len(c.sentences) for c in chunks)
         _report("segment", f"  {doc_id}: {len(chunks)} chunks, {sent_count} sentences")
@@ -131,7 +156,7 @@ def ingest(
         t2 = time.perf_counter()
 
         ontology = Ontology()
-        extractor = AnthropicExtractor()
+        extractor = LLMExtractor(_get_provider())
         result = extractor.extract_from_chunks(graph_chunks, ontology)
 
         result.triples = normalize_triples(result.triples)
