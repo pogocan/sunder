@@ -64,6 +64,7 @@ class AgentConfig:
     # Agent behavior limits
     max_steps: int = 10
     max_reads: int = 4
+    max_rewrites: int = 2
 
 
 # -- Document Structure -------------------------------------------------------

@@ -120,6 +120,14 @@ def _make_tool_action(tool_name, query):
     return {"action": "call_tool", "tool_name": tool_name, "tool_query": query}
 
 
+def _make_rewrite_action(new_query):
+    return {"action": "rewrite_search", "new_query": new_query}
+
+
+def _make_decompose_action(sub_queries):
+    return {"action": "decompose", "sub_queries": sub_queries}
+
+
 # -- Tests --------------------------------------------------------------------
 
 class TestAgentConstruction:
@@ -355,3 +363,113 @@ class TestMergeHits:
 
     def test_merge_empty_inputs(self):
         assert merge_hits([], []) == []
+
+
+class TestRewriteSearch:
+
+    def test_rewrite_produces_different_hits(self, tmp_path):
+        """rewrite_search with a new query changes the hit pool shown to the LLM."""
+        corpus = _build_topic_corpus(tmp_path)
+        # First search is the default (question). Rewrite with a very different query.
+        agent = Agent(corpus, config=AgentConfig(max_steps=5, max_reads=2, max_rewrites=2))
+        agent._provider = MockProvider([
+            _make_rewrite_action("mitochondria ATP electron transport"),
+            _make_answer_action("Rewritten answer."),
+        ])
+        result = agent.ask("photosynthesis chlorophyll")
+        assert result.answer == "Rewritten answer."
+        assert result.steps == 2
+
+        # Verify run log contains the rewrite step
+        runs_dir = Path(corpus.output_dir) / "agent_runs"
+        log_path = runs_dir / f"run_{result.run_id}.json"
+        log = json.loads(log_path.read_text(encoding="utf-8"))
+        rewrite_steps = [s for s in log["steps"] if s["type"] == "rewrite_search"]
+        assert len(rewrite_steps) == 1
+        assert rewrite_steps[0]["rewritten"] == "mitochondria ATP electron transport"
+        assert rewrite_steps[0]["original"] == "photosynthesis chlorophyll"
+        assert rewrite_steps[0]["new_hits"] > 0
+
+    def test_max_rewrites_respected(self, tmp_path):
+        """After max_rewrites, further rewrite_search actions are rejected."""
+        corpus = _build_topic_corpus(tmp_path)
+        # max_rewrites=1, try 3 rewrites then answer
+        actions = [
+            _make_rewrite_action("query A"),
+            _make_rewrite_action("query B"),  # should be rejected (limit hit)
+            _make_rewrite_action("query C"),  # should also be rejected
+            _make_answer_action("Done."),
+        ]
+        agent = Agent(corpus, config=AgentConfig(max_steps=10, max_reads=2, max_rewrites=1))
+        agent._provider = MockProvider(actions)
+        result = agent.ask("question")
+        assert result.answer == "Done."
+
+        # Only 1 rewrite should appear in the log
+        runs_dir = Path(corpus.output_dir) / "agent_runs"
+        log_path = runs_dir / f"run_{result.run_id}.json"
+        log = json.loads(log_path.read_text(encoding="utf-8"))
+        rewrite_steps = [s for s in log["steps"] if s["type"] == "rewrite_search"]
+        assert len(rewrite_steps) == 1
+
+    def test_rewrite_count_separate_from_reads(self, tmp_path):
+        """rewrite_search and read_chunk have independent counters."""
+        corpus = _build_topic_corpus(tmp_path)
+        chunk_id = list(corpus._chunks_data.keys())[0]
+        actions = [
+            _make_rewrite_action("new query"),
+            _make_read_action(chunk_id),
+            _make_answer_action("Both used.", cited=[chunk_id]),
+        ]
+        agent = Agent(corpus, config=AgentConfig(max_steps=10, max_reads=1, max_rewrites=1))
+        agent._provider = MockProvider(actions)
+        result = agent.ask("question")
+        assert chunk_id in result.chunks_read
+        assert result.steps == 3
+
+
+class TestDecompose:
+
+    def test_decompose_merges_sub_query_hits(self, tmp_path):
+        """decompose runs multiple sub-queries and merges all hits."""
+        corpus = _build_topic_corpus(tmp_path)
+        agent = Agent(corpus, config=AgentConfig(max_steps=5, max_reads=2, max_rewrites=2))
+        agent._provider = MockProvider([
+            _make_decompose_action([
+                "photosynthesis chlorophyll",
+                "mitochondria ATP",
+            ]),
+            _make_answer_action("Decomposed answer."),
+        ])
+        result = agent.ask("How do cells produce and use energy?")
+        assert result.answer == "Decomposed answer."
+
+        # Verify run log
+        runs_dir = Path(corpus.output_dir) / "agent_runs"
+        log_path = runs_dir / f"run_{result.run_id}.json"
+        log = json.loads(log_path.read_text(encoding="utf-8"))
+        decompose_steps = [s for s in log["steps"] if s["type"] == "decompose"]
+        assert len(decompose_steps) == 1
+        assert decompose_steps[0]["sub_queries"] == [
+            "photosynthesis chlorophyll",
+            "mitochondria ATP",
+        ]
+        assert decompose_steps[0]["new_hits"] > 0
+
+    def test_decompose_counts_as_one_rewrite(self, tmp_path):
+        """decompose uses one rewrite regardless of sub-query count."""
+        corpus = _build_topic_corpus(tmp_path)
+        actions = [
+            _make_decompose_action(["q1", "q2", "q3"]),
+            _make_decompose_action(["q4"]),  # should be rejected (max_rewrites=1)
+            _make_answer_action("Done."),
+        ]
+        agent = Agent(corpus, config=AgentConfig(max_steps=10, max_reads=2, max_rewrites=1))
+        agent._provider = MockProvider(actions)
+        result = agent.ask("question")
+
+        runs_dir = Path(corpus.output_dir) / "agent_runs"
+        log_path = runs_dir / f"run_{result.run_id}.json"
+        log = json.loads(log_path.read_text(encoding="utf-8"))
+        decompose_steps = [s for s in log["steps"] if s["type"] == "decompose"]
+        assert len(decompose_steps) == 1

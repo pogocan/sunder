@@ -117,14 +117,18 @@ def merge_hits(
 _AGENT_TOOL = {
     "name": "agent_action",
     "description": (
-        "Choose one action: read a chunk, call a tool, or produce a final answer."
+        "Choose one action: read a chunk, call a tool, rewrite the search query, "
+        "decompose into sub-queries, or produce a final answer."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["read_chunk", "call_tool", "answer"],
+                "enum": [
+                    "read_chunk", "call_tool", "answer",
+                    "rewrite_search", "decompose",
+                ],
                 "description": "The action to take.",
             },
             "chunk_id": {
@@ -138,6 +142,15 @@ _AGENT_TOOL = {
             "tool_query": {
                 "type": "string",
                 "description": "For call_tool: the query to pass to the tool.",
+            },
+            "new_query": {
+                "type": "string",
+                "description": "For rewrite_search: the rewritten query to search with.",
+            },
+            "sub_queries": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "For decompose: list of sub-queries to search independently and merge.",
             },
             "answer_text": {
                 "type": "string",
@@ -168,6 +181,8 @@ You will be shown search results (snippets only — not full text). To see the c
 Available actions:
 - read_chunk: Open the full text of a chunk. Use this when a snippet looks relevant but you need more context.
 - call_tool: Call an external tool. Only available if tools were provided.
+- rewrite_search: Re-run the search with a better query. Use when the initial results don't match what you need. Provide new_query. Limited number of rewrites allowed.
+- decompose: Break the question into sub-queries and search for each. Provide sub_queries (list of strings). Each sub-query is searched independently and results are merged. Counts as one rewrite.
 - answer: Produce your final answer with citations.
 
 Rules:
@@ -175,7 +190,8 @@ Rules:
 - If the search results and any chunks you've read don't contain enough information to answer, say so honestly.
 - Be concise and direct. Answer the question, don't summarize the entire document.
 - Suggest 2-3 follow-up questions the user might want to ask.
-- Each read_chunk counts toward your read limit — don't read chunks unless the snippet suggests they're relevant."""
+- Each read_chunk counts toward your read limit — don't read chunks unless the snippet suggests they're relevant.
+- Use rewrite_search or decompose when the current results seem off-topic or incomplete."""
 
 
 # -- Agent --------------------------------------------------------------------
@@ -202,6 +218,28 @@ class Agent:
             self._provider = get_provider(self.config)
         return self._provider
 
+    def _run_search(self, query: str, top_k: int = 10) -> list[SearchHit]:
+        """Run semantic + keyword search and merge results."""
+        semantic_hits = self.corpus.search(query, top_k=top_k)
+        kw_hits = keyword_search(query, self.corpus, top_k=top_k)
+        return merge_hits(semantic_hits, kw_hits)
+
+    @staticmethod
+    def _merge_hit_pools(
+        existing: list[SearchHit],
+        new: list[SearchHit],
+    ) -> list[SearchHit]:
+        """Merge two hit pools, keeping the best score per chunk_id."""
+        by_id: dict[str, SearchHit] = {}
+        for hit in existing:
+            if hit.chunk_id not in by_id or hit.score > by_id[hit.chunk_id].score:
+                by_id[hit.chunk_id] = hit
+        for hit in new:
+            if hit.chunk_id not in by_id or hit.score > by_id[hit.chunk_id].score:
+                by_id[hit.chunk_id] = hit
+        merged = sorted(by_id.values(), key=lambda h: h.score, reverse=True)
+        return merged
+
     def ask(self, question: str) -> AgentResult:
         """Ask a question and get an answer with citations."""
         run_id = uuid.uuid4().hex
@@ -209,17 +247,17 @@ class Agent:
         chunks_read: set[str] = set()
         step_count = 0
         read_count = 0
+        rewrite_count = 0
 
         max_steps = self.config.max_steps
         max_reads = self.config.max_reads
+        max_rewrites = self.config.max_rewrites
 
         # -- Step 1: Pre-load memory context --
         memory_context = self._build_memory_context(question)
 
         # -- Step 2: Search --
-        semantic_hits = self.corpus.search(question, top_k=10)
-        kw_hits = keyword_search(question, self.corpus, top_k=10)
-        merged = merge_hits(semantic_hits, kw_hits)
+        merged = self._run_search(question)
 
         steps_log.append({
             "type": "search",
@@ -356,6 +394,79 @@ class Agent:
                 messages.append({
                     "role": "user",
                     "content": f"Tool '{tool_name}' result:\n{tool_result}\n\nContinue or produce your answer.",
+                })
+
+            elif action == "rewrite_search":
+                new_query = result.input.get("new_query", "")
+
+                if rewrite_count >= max_rewrites:
+                    messages.append({"role": "assistant", "content": "[Rewrite limit reached]"})
+                    messages.append({
+                        "role": "user",
+                        "content": "Rewrite limit reached. Work with the current results or produce your answer.",
+                    })
+                    continue
+
+                new_hits = self._run_search(new_query)
+                merged = self._merge_hit_pools(merged, new_hits)
+                rewrite_count += 1
+
+                steps_log.append({
+                    "type": "rewrite_search",
+                    "original": question,
+                    "rewritten": new_query,
+                    "new_hits": len(new_hits),
+                })
+
+                snippet_context = self._format_snippets(merged[:10])
+                messages.append({
+                    "role": "assistant",
+                    "content": f"[Rewriting search: {new_query}]",
+                })
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Updated search results:\n{snippet_context}\n\n"
+                        f"Rewrites remaining: {max_rewrites - rewrite_count}. "
+                        f"Continue reading or produce your answer."
+                    ),
+                })
+
+            elif action == "decompose":
+                sub_queries = result.input.get("sub_queries", [])
+
+                if rewrite_count >= max_rewrites:
+                    messages.append({"role": "assistant", "content": "[Rewrite limit reached]"})
+                    messages.append({
+                        "role": "user",
+                        "content": "Rewrite limit reached. Work with the current results or produce your answer.",
+                    })
+                    continue
+
+                all_new: list[SearchHit] = []
+                for sq in sub_queries:
+                    all_new.extend(self._run_search(sq))
+                merged = self._merge_hit_pools(merged, all_new)
+                rewrite_count += 1
+
+                steps_log.append({
+                    "type": "decompose",
+                    "sub_queries": sub_queries,
+                    "new_hits": len(all_new),
+                })
+
+                snippet_context = self._format_snippets(merged[:10])
+                messages.append({
+                    "role": "assistant",
+                    "content": f"[Decomposed into {len(sub_queries)} sub-queries]",
+                })
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Updated search results:\n{snippet_context}\n\n"
+                        f"Rewrites remaining: {max_rewrites - rewrite_count}. "
+                        f"Continue reading or produce your answer."
+                    ),
                 })
 
             elif action == "answer":
