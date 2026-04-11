@@ -41,7 +41,8 @@ def ingest(
     extract_graph: bool = False,
     pages: str | None = None,
     on_progress: callable | None = None,
-) -> Corpus:
+    curation_report_path: str | None = None,
+) -> Corpus | None:
     """Ingest documents into a searchable corpus.
 
     Full pipeline: extract -> chunk -> segment sentences -> embed -> index.
@@ -65,6 +66,16 @@ def ingest(
         corpus.triples is populated and triples.jsonl is persisted.
     """
     cfg = config or SunderConfig()
+
+    # -- Enforce curation approval gate --
+    # If curation is enabled, a report path is mandatory. Curation and
+    # embedding must be separated by a human review step: first run writes
+    # the report and stops; second run loads the approved report and embeds.
+    if cfg.curate and not curation_report_path:
+        raise ValueError(
+            "curate=True requires curation_report_path. "
+            "Run curation first to generate the report, review it, then run embed."
+        )
 
     # Create LLM provider lazily: only needed for topic chunking or graph extraction
     _provider: LLMProvider | None = provider
@@ -98,6 +109,32 @@ def ingest(
         if not text.strip():
             _report("extract", f"  Skipped {doc_id}: empty text")
             continue
+
+        # -- Stage 1b (optional): LLM-assisted curation --
+        # Strict two-step gate: first invocation writes a report and stops
+        # (no embedding). Second invocation loads the approved report and
+        # proceeds. curate_text() and apply_curation() are never chained
+        # internally -- the human review step between them is mandatory.
+        if cfg.curate:
+            from .curator import apply_curation, curate_text, load_report, save_report
+
+            report_path = Path(curation_report_path)  # type: ignore[arg-type]
+            if not report_path.exists():
+                _report("curate", f"  Curating {doc_id} with Claude...")
+                report = curate_text(text, doc_id, cfg)
+                save_report(report, report_path)
+                print(
+                    f"\nCuration complete. Review {report_path} then run embed."
+                )
+                return None
+
+            _report("curate", f"  Loading curation report from {report_path}")
+            report = load_report(report_path)
+            text = "\n\n".join(apply_curation(report))
+
+            if not text.strip():
+                _report("curate", f"  Skipped {doc_id}: empty after curation")
+                continue
 
         # -- Stage 2: Chunk --
         # "topic_sentence" mode builds sentences during chunking (no separate step).
