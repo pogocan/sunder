@@ -12,9 +12,23 @@ anything is written to disk.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .types import SunderConfig
+
+
+def _strip_code_fences(text: str) -> str:
+    """Strip ```json ... ``` or ``` ... ``` wrappers from an LLM response.
+
+    Claude sometimes wraps JSON in a markdown code fence despite being told
+    not to. Accept both fenced and unfenced responses.
+    """
+    s = text.strip()
+    m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", s, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return s
 
 SYSTEM_PROMPT = """You are a document curator preparing text for a RAG system.
 
@@ -150,7 +164,7 @@ def curate_text(
         )
 
         try:
-            result = json.loads(response.content[0].text)
+            result = json.loads(_strip_code_fences(response.content[0].text))
             decision = result.get("decision", "KEEP")
             chunks = result.get("chunks", [])
             reason = result.get("reason", "")
