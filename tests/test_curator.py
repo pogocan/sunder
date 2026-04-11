@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 from sunder.curator import (
     _format_goals,
     _split_into_sections,
+    _strip_code_fences,
     apply_curation,
     curate_text,
     load_report,
@@ -112,6 +113,43 @@ def test_discard_decision_returns_nothing():
     assert report[0]["decision"] == "DISCARD"
     assert report[0]["chunks"] == []
     assert apply_curation(report) == []
+
+
+def test_strip_code_fences_json_tag():
+    wrapped = '```json\n{"decision": "KEEP", "chunks": ["x"]}\n```'
+    assert _strip_code_fences(wrapped) == '{"decision": "KEEP", "chunks": ["x"]}'
+
+
+def test_strip_code_fences_bare_fence():
+    wrapped = '```\n{"a": 1}\n```'
+    assert _strip_code_fences(wrapped) == '{"a": 1}'
+
+
+def test_strip_code_fences_unfenced_passthrough():
+    raw = '{"decision": "KEEP"}'
+    assert _strip_code_fences(raw) == raw
+
+
+def test_strip_code_fences_with_leading_whitespace():
+    wrapped = '   ```json\n{"k": "v"}\n```   '
+    assert _strip_code_fences(wrapped) == '{"k": "v"}'
+
+
+def test_fenced_claude_response_is_parsed_not_warned():
+    """A fenced response must be parsed -- not fall through to the warning."""
+    section = "some body text"
+    cfg = _config_with_goals()
+
+    fenced = '```json\n{"decision": "REWRITE", "reason": "clean", "chunks": ["rewritten body"]}\n```'
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_anthropic_response(fenced)
+    _install_fake_anthropic(fake_client)
+
+    report = curate_text(section, "doc1", cfg)
+
+    assert report[0]["decision"] == "REWRITE"
+    assert report[0]["chunks"] == ["rewritten body"]
+    assert "WARNING" not in report[0]["reason"]
 
 
 def test_malformed_json_falls_back_to_keep_with_warning():
