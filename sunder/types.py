@@ -34,6 +34,8 @@ class SunderConfig:
 
     # Embedding model
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_provider: str = "sentence-transformers"  # "sentence-transformers" or "openai"
+    openai_api_key: str | None = None                   # caller passes in, sunder never reads env
     embedding_dim: int = 384        # must match model output
     embedding_batch_size: int = 32
 

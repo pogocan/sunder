@@ -39,6 +39,29 @@ def _load_model(model_name: str):
     return SentenceTransformer(model_name)
 
 
+def _embed_batch(
+    texts: list[str],
+    config: SunderConfig,
+    st_model=None,
+) -> np.ndarray:
+    """Embed a batch of texts using the configured provider.
+
+    For "sentence-transformers", st_model must be a pre-loaded model to avoid
+    reloading per batch. For "openai", st_model is ignored.
+    """
+    if config.embedding_provider == "openai":
+        from openai import OpenAI
+        client = OpenAI(api_key=config.openai_api_key)
+        response = client.embeddings.create(
+            model=config.embedding_model,
+            input=texts,
+        )
+        return np.array([e.embedding for e in response.data], dtype=np.float32)
+    else:
+        vectors = st_model.encode(texts, normalize_embeddings=False)
+        return np.array(vectors, dtype=np.float32)
+
+
 def _load_progress(output_dir: Path) -> set[str]:
     """Load the set of already-embedded sentence_ids from progress checkpoint."""
     progress_path = output_dir / _PROGRESS_FILE
@@ -241,7 +264,7 @@ def index_embeddings(
 
     if to_embed:
         # -- Embed in batches --
-        model = _load_model(cfg.embedding_model)
+        st_model = _load_model(cfg.embedding_model) if cfg.embedding_provider == "sentence-transformers" else None
         batch_size = cfg.embedding_batch_size
         checkpoint_interval = 10  # save every 10 batches
 
@@ -250,8 +273,7 @@ def index_embeddings(
             batch_texts = to_embed[batch_start:batch_end]
             batch_meta = to_embed_meta[batch_start:batch_end]
 
-            vectors = model.encode(batch_texts, normalize_embeddings=False)
-            vectors = np.array(vectors, dtype=np.float32)
+            vectors = _embed_batch(batch_texts, cfg, st_model=st_model)
 
             index.add(vectors)
             metadata.extend(batch_meta)
@@ -424,11 +446,10 @@ class Corpus:
         if self.index.ntotal == 0:
             return []
 
-        # Embed query (model cached after first load)
-        if self._model is None:
+        # Embed query (ST model cached after first load; OpenAI has no local model)
+        if self.config.embedding_provider == "sentence-transformers" and self._model is None:
             self._model = _load_model(self.config.embedding_model)
-        query_vec = self._model.encode([query], normalize_embeddings=False)
-        query_vec = np.array(query_vec, dtype=np.float32)
+        query_vec = _embed_batch([query], self.config, st_model=self._model)
 
         # Search FAISS -- fetch more than needed, then group by chunk
         n_fetch = min(k * oversample, self.index.ntotal)
