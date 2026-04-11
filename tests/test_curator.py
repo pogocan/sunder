@@ -170,31 +170,69 @@ def test_format_goals_handles_all_four_keys():
     assert "Rewrite instructions:" in out and "- strip headers" in out
 
 
-def test_split_into_sections_respects_max_words_and_paragraph_boundaries():
-    p1 = " ".join(["alpha"] * 100)
-    p2 = " ".join(["beta"] * 100)
-    p3 = " ".join(["gamma"] * 100)
+def test_split_into_sections_respects_max_chars_and_paragraph_boundaries():
+    p1 = "a" * 200
+    p2 = "b" * 200
+    p3 = "c" * 200
     text = f"{p1}\n\n{p2}\n\n{p3}"
 
-    sections = _split_into_sections(text, max_words=150)
+    sections = _split_into_sections(text, max_chars=250)
 
-    # Each paragraph is 100 words; max 150 -> can't fit 2 together (200 > 150)
+    # Each paragraph is 200 chars; max 250 -> can't fit 2 together (400 > 250)
     assert len(sections) == 3
-    assert "alpha" in sections[0] and "beta" not in sections[0]
-    assert "beta" in sections[1]
-    assert "gamma" in sections[2]
-
-    # Ensure no paragraph was mid-split
-    for s in sections:
-        assert s == s.strip()
+    assert sections[0] == p1
+    assert sections[1] == p2
+    assert sections[2] == p3
 
 
 def test_split_into_sections_groups_small_paragraphs():
     p1 = "one two three"
     p2 = "four five six"
-    sections = _split_into_sections(f"{p1}\n\n{p2}", max_words=1500)
+    sections = _split_into_sections(f"{p1}\n\n{p2}", max_chars=2500)
     assert len(sections) == 1
     assert "one" in sections[0] and "four" in sections[0]
+
+
+def test_split_into_sections_splits_oversized_paragraph_on_single_newlines():
+    # One paragraph with many lines, total > max_chars
+    lines = [f"line {i} " + ("x" * 50) for i in range(40)]
+    big_para = "\n".join(lines)  # single paragraph -- no double newlines inside
+    assert len(big_para) > 500
+
+    sections = _split_into_sections(big_para, max_chars=500)
+
+    assert len(sections) > 1
+    # Every line must appear somewhere, in order, without being broken up.
+    joined = " ".join(sections)
+    for i in range(40):
+        assert f"line {i}" in joined
+
+
+def test_split_into_sections_never_exceeds_twice_max_chars():
+    # Mix of normal paragraphs and one oversized paragraph.
+    small = "short para"
+    oversized_lines = [("y" * 200) for _ in range(20)]  # 20 * 200 = 4000 chars
+    oversized = "\n".join(oversized_lines)
+    text = f"{small}\n\n{oversized}\n\n{small}"
+
+    max_chars = 800
+    sections = _split_into_sections(text, max_chars=max_chars)
+
+    for s in sections:
+        assert len(s) <= max_chars * 2, f"section of {len(s)} chars exceeds 2x limit"
+
+
+def test_split_into_sections_handles_huge_chapter():
+    # Simulate a ~100K-char chapter: many paragraphs separated by \n\n.
+    paragraphs = [("word " * 80).strip() for _ in range(300)]  # ~300 * 400 = 120K
+    text = "\n\n".join(paragraphs)
+    assert len(text) > 100_000
+
+    sections = _split_into_sections(text, max_chars=2500)
+
+    assert len(sections) > 20
+    for s in sections:
+        assert len(s) <= 5000  # 2 * max_chars
 
 
 def test_curate_text_does_not_call_apply_curation():

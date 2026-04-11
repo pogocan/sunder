@@ -72,28 +72,42 @@ def _format_goals(goals: dict) -> str:
     return "\n".join(lines)
 
 
-def _split_into_sections(text: str, max_words: int = 1500) -> list[str]:
-    """Split text into sections respecting double-newline boundaries.
+def _split_into_sections(text: str, max_chars: int = 2500) -> list[str]:
+    """Split text into sections of roughly max_chars.
 
-    Large max_words ensures complete statement definitions stay together.
+    Splits on double newlines first, then single newlines if a single
+    paragraph is itself too large. Sized in characters (not words) so the
+    prompt stays within the model's structured-JSON response budget.
     """
     paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+
     sections: list[str] = []
     current: list[str] = []
-    current_words = 0
+    current_chars = 0
 
-    for para in paragraphs:
-        para_words = len(para.split())
-        if current_words + para_words > max_words and current:
+    def flush() -> None:
+        nonlocal current, current_chars
+        if current:
             sections.append('\n\n'.join(current))
             current = []
-            current_words = 0
-        current.append(para)
-        current_words += para_words
+            current_chars = 0
 
-    if current:
-        sections.append('\n\n'.join(current))
+    for para in paragraphs:
+        if len(para) > max_chars:
+            # Paragraph is too large on its own -- split on single newlines.
+            lines = [l.strip() for l in para.split('\n') if l.strip()]
+            for line in lines:
+                if current_chars + len(line) > max_chars and current:
+                    flush()
+                current.append(line)
+                current_chars += len(line)
+        else:
+            if current_chars + len(para) > max_chars and current:
+                flush()
+            current.append(para)
+            current_chars += len(para)
 
+    flush()
     return sections
 
 
@@ -124,7 +138,7 @@ def curate_text(
 
         response = client.messages.create(
             model="claude-opus-4-6",
-            max_tokens=4096,
+            max_tokens=8096,
             system=SYSTEM_PROMPT,
             messages=[{
                 "role": "user",
