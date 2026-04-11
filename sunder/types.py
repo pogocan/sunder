@@ -42,6 +42,11 @@ class SunderConfig:
     # Graph extraction
     graph_max_chunks: int | None = None  # limit chunks for KG extraction (None = all)
 
+    # LLM-assisted curation (optional, runs after extract, before chunking)
+    curate: bool = False
+    curation_goals: dict | None = None
+    anthropic_api_key: str | None = None  # caller passes in, never read from env
+
     # Vector store
     vector_store: str = "faiss"     # "faiss" only for now; field exists for forward compat
 

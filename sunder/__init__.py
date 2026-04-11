@@ -6,6 +6,7 @@ __version__ = "0.1.0"
 
 from .agent import Agent
 from .agent_types import AgentMemory, AgentResult, AgentTool
+from .curator import apply_curation, curate_text, load_report, save_report
 from .ingest import ingest
 from .index import Corpus
 from .types import (
@@ -32,4 +33,8 @@ __all__ = [
     "Triple",
     "SearchHit",
     "Ontology",
+    "curate_text",
+    "apply_curation",
+    "save_report",
+    "load_report",
 ]

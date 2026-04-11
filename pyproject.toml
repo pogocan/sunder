@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 graph = ["anthropic>=0.42"]
+curate = ["anthropic>=0.42"]
 ollama = ["requests>=2.31"]
 openai = ["openai>=1.0"]
 dev = ["pytest>=8.0"]
