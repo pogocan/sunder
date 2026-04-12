@@ -49,6 +49,35 @@ class TestSunderConfigPersistence:
         assert cfg.vector_store == "faiss"
 
 
+class TestSecretRedaction:
+    """API keys must never be written to config.json on disk."""
+
+    def test_save_config_redacts_api_keys(self, tmp_path):
+        from sunder.index import _save_config, _load_config
+        cfg = SunderConfig(
+            openai_api_key="sk-openai-secret",
+            anthropic_api_key="sk-anthropic-secret",
+        )
+        _save_config(tmp_path, cfg)
+
+        raw = json.loads((tmp_path / "config.json").read_text())
+        assert "openai_api_key" not in raw
+        assert "anthropic_api_key" not in raw
+        assert "sk-openai-secret" not in json.dumps(raw)
+        assert "sk-anthropic-secret" not in json.dumps(raw)
+
+    def test_load_config_returns_none_keys(self, tmp_path):
+        from sunder.index import _save_config, _load_config
+        cfg = SunderConfig(
+            openai_api_key="sk-openai-secret",
+            anthropic_api_key="sk-anthropic-secret",
+        )
+        _save_config(tmp_path, cfg)
+        loaded = _load_config(tmp_path)
+        assert loaded.openai_api_key is None
+        assert loaded.anthropic_api_key is None
+
+
 class TestAgentConfigDefaults:
     """AgentConfig has the expected default values."""
 

@@ -89,11 +89,16 @@ def _load_config(output_dir: Path) -> SunderConfig | None:
     return None
 
 
+# Keys that must never be written to disk
+_SECRET_FIELDS = {"openai_api_key", "anthropic_api_key"}
+
+
 def _save_config(output_dir: Path, config: SunderConfig):
-    """Save config alongside the index."""
+    """Save config alongside the index. API keys are redacted."""
     config_path = output_dir / _CONFIG_FILE
+    data = {k: v for k, v in asdict(config).items() if k not in _SECRET_FIELDS}
     config_path.write_text(
-        json.dumps(asdict(config), indent=2),
+        json.dumps(data, indent=2),
         encoding="utf-8",
     )
 
