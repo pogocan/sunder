@@ -86,43 +86,114 @@ def _format_goals(goals: dict) -> str:
     return "\n".join(lines)
 
 
-def _split_into_sections(text: str, max_chars: int = 2500) -> list[str]:
-    """Split text into sections of roughly max_chars.
+# Patterns that indicate a new top-level topic boundary
+# Matches lines that are standalone uppercase words/phrases
+# e.g. "CHAR", "DATE", "DEFINE RECORD", "ALTER LOG", "COLLECT"
+_HEADING_PATTERN = re.compile(
+    r'^([A-Z][A-Z0-9 ]{1,40})$',
+    re.MULTILINE
+)
 
-    Splits on double newlines first, then single newlines if a single
-    paragraph is itself too large. Sized in characters (not words) so the
-    prompt stays within the model's structured-JSON response budget.
+
+def _is_heading(line: str) -> bool:
+    """Return True if line looks like a standalone statement/function heading."""
+    line = line.strip()
+    if not line:
+        return False
+    return bool(_HEADING_PATTERN.match(line))
+
+
+def _split_on_headings(text: str) -> list[str]:
     """
-    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-
+    Split text on standalone uppercase heading lines.
+    Returns list of sections, each starting with its heading.
+    """
+    lines = text.split('\n')
     sections: list[str] = []
     current: list[str] = []
-    current_chars = 0
 
-    def flush() -> None:
-        nonlocal current, current_chars
-        if current:
-            sections.append('\n\n'.join(current))
-            current = []
-            current_chars = 0
-
-    for para in paragraphs:
-        if len(para) > max_chars:
-            # Paragraph is too large on its own -- split on single newlines.
-            lines = [l.strip() for l in para.split('\n') if l.strip()]
-            for line in lines:
-                if current_chars + len(line) > max_chars and current:
-                    flush()
-                current.append(line)
-                current_chars += len(line)
+    for line in lines:
+        if _is_heading(line) and current:
+            # Flush current section when we hit a new heading
+            section = '\n'.join(current).strip()
+            if section:
+                sections.append(section)
+            current = [line]
         else:
-            if current_chars + len(para) > max_chars and current:
-                flush()
-            current.append(para)
-            current_chars += len(para)
+            current.append(line)
 
-    flush()
+    if current:
+        section = '\n'.join(current).strip()
+        if section:
+            sections.append(section)
+
     return sections
+
+
+def _split_into_sections(text: str, max_chars: int = 2500) -> list[str]:
+    """
+    Split text into sections for curation.
+
+    Strategy:
+    1. First split on standalone uppercase headings (CHAR, DATE, DEFINE RECORD etc.)
+       This keeps each function/statement definition intact.
+    2. If any resulting section is still larger than max_chars * 2,
+       further split on double newlines.
+    3. Last resort: split on single newlines.
+
+    Never produces a section larger than max_chars * 2.
+    """
+    # Step 1: split on headings
+    heading_sections = _split_on_headings(text)
+
+    # If heading detection found nothing useful, fall back to original behavior
+    if len(heading_sections) <= 1:
+        heading_sections = [text]
+
+    # Step 2 & 3: further split oversized sections
+    final_sections: list[str] = []
+
+    for section in heading_sections:
+        if len(section) <= max_chars * 2:
+            final_sections.append(section)
+            continue
+
+        # Too large — split on double newlines
+        paragraphs = [p.strip() for p in section.split('\n\n') if p.strip()]
+        current: list[str] = []
+        current_chars = 0
+
+        for para in paragraphs:
+            if len(para) > max_chars:
+                # Single paragraph too large — split on single newlines
+                if current:
+                    final_sections.append('\n\n'.join(current))
+                    current = []
+                    current_chars = 0
+                lines = [l.strip() for l in para.split('\n') if l.strip()]
+                line_current: list[str] = []
+                line_chars = 0
+                for line in lines:
+                    if line_chars + len(line) > max_chars and line_current:
+                        final_sections.append('\n'.join(line_current))
+                        line_current = []
+                        line_chars = 0
+                    line_current.append(line)
+                    line_chars += len(line)
+                if line_current:
+                    final_sections.append('\n'.join(line_current))
+            else:
+                if current_chars + len(para) > max_chars and current:
+                    final_sections.append('\n\n'.join(current))
+                    current = []
+                    current_chars = 0
+                current.append(para)
+                current_chars += len(para)
+
+        if current:
+            final_sections.append('\n\n'.join(current))
+
+    return [s for s in final_sections if s.strip()]
 
 
 def curate_text(

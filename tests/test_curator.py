@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 from sunder.curator import (
     _format_goals,
+    _is_heading,
     _split_into_sections,
     _strip_code_fences,
     apply_curation,
@@ -305,6 +306,70 @@ def test_curate_text_does_not_call_apply_curation():
     # The raw report still contains the original, even though decision=DISCARD.
     assert report[0]["original"] == section
     assert report[0]["decision"] == "DISCARD"
+
+
+# -- heading-based splitting tests -------------------------------------------
+
+
+def test_is_heading_true_for_uppercase_headings():
+    for h in ["CHAR", "DATE", "DEFINE RECORD", "ALTER LOG", "COLLECT"]:
+        assert _is_heading(h), f"expected True for {h!r}"
+
+
+def test_is_heading_false_for_mixed_case_and_titles():
+    for h in ["Result", "Example", "Syntax", "mixed Case", "Some Title Here", ""]:
+        assert not _is_heading(h), f"expected False for {h!r}"
+
+
+def test_split_on_headings_two_sections():
+    text = "CHAR\nchar content line 1\nchar content line 2\nDATE\ndate content line 1"
+    sections = _split_into_sections(text, max_chars=5000)
+    assert len(sections) == 2
+    assert sections[0].startswith("CHAR")
+    assert sections[1].startswith("DATE")
+
+
+def test_split_on_headings_define_record():
+    text = "DEFINE RECORD\nrecord stuff\nmore record\nDEFINE UPDATE\nupdate stuff"
+    sections = _split_into_sections(text, max_chars=5000)
+    assert len(sections) == 2
+    assert "DEFINE RECORD" in sections[0]
+    assert "DEFINE UPDATE" in sections[1]
+
+
+def test_no_headings_falls_back_to_char_splitting():
+    # No uppercase headings — should fall back to paragraph/char splitting
+    p1 = "a" * 200
+    p2 = "b" * 200
+    p3 = "c" * 200
+    text = f"{p1}\n\n{p2}\n\n{p3}"
+    sections = _split_into_sections(text, max_chars=250)
+    assert len(sections) == 3
+
+
+def test_oversized_heading_section_further_split():
+    # One heading section that exceeds max_chars * 2
+    big_content = "\n\n".join(["para " + "x" * 300 for _ in range(10)])
+    text = f"BIGHEADING\n{big_content}"
+    max_chars = 500
+    sections = _split_into_sections(text, max_chars=max_chars)
+    assert len(sections) > 1
+    for s in sections:
+        assert len(s) <= max_chars * 2, f"section of {len(s)} chars exceeds 2x limit"
+
+
+def test_heading_split_no_section_exceeds_twice_max():
+    headings = ["ALPHA", "BRAVO", "CHARLIE"]
+    parts = []
+    for h in headings:
+        parts.append(h)
+        # Use multiple lines so oversized sections can be split on newlines
+        parts.append("\n".join(["x" * 80 for _ in range(10)]))
+    text = "\n".join(parts)
+    max_chars = 300
+    sections = _split_into_sections(text, max_chars=max_chars)
+    for s in sections:
+        assert len(s) <= max_chars * 2
 
 
 # -- ingest() curation gate tests -------------------------------------------
