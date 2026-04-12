@@ -51,7 +51,11 @@ def _embed_batch(
     """
     if config.embedding_provider == "openai":
         from openai import OpenAI
-        client = OpenAI(api_key=config.openai_api_key)
+        # Pass api_key only if explicitly set; otherwise OpenAI SDK reads OPENAI_API_KEY env var
+        kwargs = {}
+        if config.openai_api_key:
+            kwargs["api_key"] = config.openai_api_key
+        client = OpenAI(**kwargs)
         response = client.embeddings.create(
             model=config.embedding_model,
             input=texts,
@@ -356,7 +360,12 @@ class Corpus:
         self._model = None
 
     @classmethod
-    def load(cls, output_dir: str, chunks: list[Chunk] | None = None) -> "Corpus":
+    def load(
+        cls,
+        output_dir: str,
+        chunks: list[Chunk] | None = None,
+        config: SunderConfig | None = None,
+    ) -> "Corpus":
         """Load a previously built Corpus from disk.
 
         Fully functional: snippets from metadata, chunk text from chunks.jsonl,
@@ -365,18 +374,29 @@ class Corpus:
         Args:
             output_dir: Directory containing index files.
             chunks: Optional — ignored (kept for backward compatibility).
+            config: Optional runtime config supplying API keys and overrides.
+                    Index-critical fields (embedding_model, embedding_dim) are
+                    always read from the saved config.json. If provided, runtime
+                    fields like openai_api_key and anthropic_api_key are taken
+                    from this config.
         """
         out = Path(output_dir)
-        config = _load_config(out)
-        if config is None:
+        saved_config = _load_config(out)
+        if saved_config is None:
             raise FileNotFoundError(
                 f"No config.json found in {output_dir}. "
                 f"Is this a valid sunder corpus directory?"
             )
+        # Merge runtime secrets from caller config into saved config
+        if config is not None:
+            if config.openai_api_key is not None:
+                saved_config.openai_api_key = config.openai_api_key
+            if config.anthropic_api_key is not None:
+                saved_config.anthropic_api_key = config.anthropic_api_key
         return cls(
             output_dir=output_dir,
             chunks=chunks or [],
-            config=config,
+            config=saved_config,
         )
 
     @property
