@@ -11,7 +11,7 @@ import hashlib
 import time
 from pathlib import Path
 
-from .chunking import chunk_by_topics, chunk_by_topics_sentence_aware, chunk_text
+from .chunking import chunk_by_topics, chunk_by_topics_sentence_aware, chunk_text, chunk_whole
 from .extract import extract_pdf
 from .index import Corpus, index_embeddings, _save_triples
 from .kg import LLMExtractor, normalize_triples, deduplicate_triples
@@ -141,7 +141,10 @@ def ingest(
         # "topic" and "flat" modes require a separate segment_sentences() pass.
         sentences_done = False
 
-        if cfg.chunking_mode == "topic_sentence":
+        if cfg.chunking_mode == "none":
+            _report("chunk", f"  Passthrough chunking {doc_id} (whole text as single chunk)...")
+            chunks = chunk_whole(text, doc_id, config=cfg)
+        elif cfg.chunking_mode == "topic_sentence":
             _report("chunk", f"  Topic segmentation + sentence-aware chunking {doc_id}...")
             structure = detect_structure(text, method="topics", doc_title=doc_id, provider=_get_provider())
             _report("chunk", f"  {len(structure.sections)} topics detected")

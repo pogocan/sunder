@@ -127,6 +127,38 @@ def chunk_text(
     return chunks
 
 
+def chunk_whole(
+    text: str, doc_id: str, config: SunderConfig | None = None,
+) -> list[Chunk]:
+    """Passthrough chunking: the entire text becomes a single chunk.
+
+    No splitting, no overlap, no min_chunk_size filtering.
+    Use when the caller has already pre-chunked the input (e.g. curated
+    sections passed individually to sunder.ingest()).
+
+    Args:
+        text: The full text to treat as one chunk.
+        doc_id: Document identifier.
+        config: Pipeline config (unused, accepted for signature consistency).
+
+    Returns:
+        A single-element list containing one Chunk, or empty if text is blank.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    return [Chunk(
+        chunk_id=f"{doc_id}_chunk_0000",
+        doc_id=doc_id,
+        text=text,
+        token_count=len(text) // 4,
+        chunk_index=0,
+        page=1,
+        start_char=0,
+        end_char=len(text),
+    )]
+
+
 def chunk_by_topics(
     full_text: str,
     doc_id: str,
