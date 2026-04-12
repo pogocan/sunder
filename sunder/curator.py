@@ -222,7 +222,7 @@ def curate_text(
         print(f"  Section {i + 1}/{len(sections)}...", end="\r")
 
         response = client.messages.create(
-            model="claude-opus-4-6",
+            model=config.curation_model,
             max_tokens=8096,
             system=SYSTEM_PROMPT,
             messages=[{

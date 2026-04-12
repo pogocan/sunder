@@ -46,6 +46,12 @@ class SunderConfig:
     curate: bool = False
     curation_goals: dict | None = None
     anthropic_api_key: str | None = None  # caller passes in, never read from env
+    # Model for LLM curation. Common options:
+    #   "claude-sonnet-4-5-20241022"   — Sonnet 4.5
+    #   "claude-sonnet-4-6"            — Sonnet 4.6
+    #   "claude-haiku-4-5-20251001"    — Haiku 4.5 (fastest/cheapest)
+    #   "claude-opus-4-6"              — Opus 4.6
+    curation_model: str = "claude-sonnet-4-5-20241022"
 
     # Vector store
     vector_store: str = "faiss"     # "faiss" only for now; field exists for forward compat
